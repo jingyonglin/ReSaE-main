@@ -1,24 +1,19 @@
 import os
 
 os.environ['MKL_NUM_THREADS'] = '1'
-
 from functools import partial
 import random
 import sys
 import collections
-
-# Local imports
 from data_loaders.data_manager import DataManager
 from utils.utils import *
-from utils.utils_mytorch import FancyDict, parse_args, BadParameters, mt_save_dir
+from utils.utils_mytorch import mt_save_dir
 from loops.evaluation import EvaluationBenchGNNMultiClass, evaluate_pointwise
 from loops.evaluation import acc, mrr, mr, hits_at
-from models.models import ReSaE_ConvKB_Statement, ReSaE_Transformer_Triples, Transformer_Baseline
 from models.models_statements import ReSaE_Transformer
 from loops.corruption import Corruption
 from loops.sampler import MultiClassSampler
 from loops.loops import training_loop_gcn
-import argparse
 from config import *
 
 

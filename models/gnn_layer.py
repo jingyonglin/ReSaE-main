@@ -87,20 +87,6 @@ class ReSaEConvLayer(MessagePassing):
     def reset_parameters(self):
         self.relation_weight_linear.weight = torch.nn.init.uniform_(self.relation_weight_linear.weight, 0, 1)
 
-    def qual_relation_attention(self, rel_embed, qualifier_rel):
-        # 得到qualifiers的 weight   attention +residual
-        relation_co_occ = torch.zeros(qualifier_rel.size(0), rel_embed.size(0), dtype=torch.long,
-                                      device=rel_embed.device)  # 37433,1065
-
-        relation_co_occ = relation_co_occ.scatter(1, qualifier_rel.unsqueeze(1), 1).to(dtype=torch.float)  # 37433,1065
-
-        simi_matrix = torch.matmul(rel_embed, rel_embed.T) / np.sqrt(rel_embed.size(1))
-        simi_matrix = self.soft_max(simi_matrix)
-        relation_simi_matrix = simi_matrix[qualifier_rel]  # 37433,1065
-        relation_co_occ = torch.mul(relation_simi_matrix, relation_co_occ)  # 37433,1065
-        relation_with_weight = torch.matmul(relation_co_occ, rel_embed)  # 37433, 200
-        out = self.drop_out_qr(self.layernorm_rel(rel_embed[qualifier_rel] + relation_with_weight))
-        return out
 
     def qual_relation_attention_avg(self, rel_embed,qualifier_rel):
         # 得到qualifiers的 weight   attention +residual
@@ -128,60 +114,6 @@ class ReSaEConvLayer(MessagePassing):
         cooc_num_rel = scatter_add(cooc_num, edge_type, dim=0, dim_size=rel_embed.size(0))  # 300,030
         cooc_num_rel /= torch.mean(cooc_num_rel.sum(0))
         return cooc_num_rel
-
-    def ent_cooc(self, ent_embed, qualifier_ent, ent_type, qual_index):
-        ent_co_occ = torch.zeros(qualifier_ent.size(0), ent_embed.size(0), dtype=torch.long,
-                                 device=ent_embed.device)  # 450,300
-
-        ent_co_occ = ent_co_occ.scatter(1, qualifier_ent.unsqueeze(1), 1).to(dtype=torch.float)  # 450,300
-
-        cooc_num = scatter_add(ent_co_occ, qual_index, dim=0, dim_size=ent_type.size(0))  # 1000,300
-        cooc_num_ent = scatter_add(cooc_num, ent_type, dim=0, dim_size=ent_embed.size(0))  # 300,030
-        cooc_num_ent /= torch.mean(cooc_num_ent.sum(0))
-        return cooc_num_ent
-
-    def update_rel_emb_with_qualifier(self, rel_embed, ent_embed, qualifier_rel, qualifier_ent, edge_type,
-                                      qual_index=None):
-
-        # qualifier_relation = self.qual_relation_attention(rel_embed,qualifier_rel) #
-        # qualifier_relation = rel_embed[qualifier_rel]
-        rel_part_emb = rel_embed[edge_type]  # 所有边
-        qualifier_emb_rel = rel_embed[qualifier_rel]
-        qualifier_emb_ent = ent_embed[qualifier_ent]
-
-        # Step 2: pass it through qual_transform
-        qualifier_emb = self.qual_transform(qualifier_ent=qualifier_emb_ent,
-                                            qualifier_rel=qualifier_emb_rel)
-
-        # qualifier_emb = torch.einsum('ij,jk -> ik',
-        #                              self.coalesce_quals_rel(qualifier_emb, qual_index, rel_part_emb.shape[0]),
-        #                              self.w_qr) #
-        qualifier_emb = scatter_mean(qualifier_emb, qual_index, dim=0, dim_size=rel_part_emb.shape[0])
-        qualifier_emb = self.drop_out_qr(qualifier_emb)
-        # qualifier_emb = torch.tanh(qualifier_emb)
-
-        add_index = torch.zeros(edge_type.size(0), device=qualifier_emb.device).index_fill(0, qual_index, 1)
-        rel_qual_part = torch.stack([torch.mul(add_index.unsqueeze(1), rel_part_emb), qualifier_emb])
-        out = torch.mul((1 - add_index).unsqueeze(1), rel_part_emb) + rel_qual_part
-
-        return out
-
-    def update_ent_emb_with_qualifier(self, ent_embs, ent_embed, qualifier_ent, edge_type_len, alpha=0.1,
-                                      qual_index=None):
-        # 先做加法
-        qualifier_emb_ent = ent_embed[qualifier_ent]
-
-        qualifier_emb_ent = torch.einsum('ij,jk -> ik',
-                                         self.coalesce_quals_ent(qualifier_emb_ent, qual_index, edge_type_len),
-                                         self.w_qe)
-
-        qualifier_emb_ent = self.drop_out_qe(qualifier_emb_ent)
-        # qualifier_emb_ent = torch.tanh(qualifier_emb_ent)
-        add_index = torch.zeros(edge_type_len, device=qualifier_ent.device).index_fill(0, qual_index, 1)
-        rel_qual_part = alpha * torch.mul(add_index.unsqueeze(1), ent_embs) + (1 - alpha) * qualifier_emb_ent
-        out = torch.mul((1 - add_index).unsqueeze(1), ent_embs) + rel_qual_part
-
-        return out
 
     def forward(self, x, edge_index, edge_type, rel_embed, qualifier_ent=None, qualifier_rel=None, quals=None):
 
@@ -278,82 +210,6 @@ class ReSaEConvLayer(MessagePassing):
         # Ignoring the self loop inserted, return.
         return self.act(out), rel_embed[:-1]  # sub, rel
 
-    def rel_transform(self, ent_embed, rel_embed):
-        if self.p['RESAEARGS']['OPN'] == 'corr':
-            trans_embed = ccorr(ent_embed, rel_embed)
-        elif self.p['RESAEARGS']['OPN'] == 'sub':
-            trans_embed = ent_embed - rel_embed
-        elif self.p['RESAEARGS']['OPN'] == 'mult':
-            trans_embed = ent_embed * rel_embed
-        elif self.p['RESAEARGS']['OPN'] == 'rotate':
-            trans_embed = rotate(ent_embed, rel_embed)
-        else:
-            raise NotImplementedError
-
-        return trans_embed
-
-    def qual_transform(self, qualifier_ent, qualifier_rel):
-        """
-
-        :return:
-        """
-        if self.p['RESAEARGS']['QUAL_OPN'] == 'corr':
-            trans_embed = ccorr(qualifier_ent, qualifier_rel)
-        elif self.p['RESAEARGS']['QUAL_OPN'] == 'sub':
-            trans_embed = qualifier_ent - qualifier_rel
-        elif self.p['RESAEARGS']['QUAL_OPN'] == 'mult':
-            trans_embed = qualifier_ent * qualifier_rel
-        elif self.p['RESAEARGS']['QUAL_OPN'] == 'rotate':
-            trans_embed = rotate(qualifier_ent, qualifier_rel)
-        else:
-            raise NotImplementedError
-
-        return trans_embed
-
-    def qualifier_aggregate(self, qualifier_emb, rel_part_emb, alpha=0.5, qual_index=None):
-
-        if self.p['RESAEARGS']['QUAL_AGGREGATE'] == 'sum':
-            qualifier_emb = torch.einsum('ij,jk -> ik',
-                                         self.coalesce_quals_rel(qualifier_emb, qual_index, rel_part_emb.shape[0]),
-                                         self.w_qr)
-            return alpha * rel_part_emb + (1 - alpha) * qualifier_emb  # [N_EDGES / 2 x EMB_DIM]
-        elif self.p['RESAEARGS']['QUAL_AGGREGATE'] == 'concat':
-            qualifier_emb = self.coalesce_quals_rel(qualifier_emb, qual_index, rel_part_emb.shape[0])
-            agg_rel = torch.cat((rel_part_emb, qualifier_emb), dim=1)  # [N_EDGES / 2 x 2 * EMB_DIM]
-            return torch.mm(agg_rel, self.w_qr)  # [N_EDGES / 2 x EMB_DIM]
-
-        elif self.p['RESAEARGS']['QUAL_AGGREGATE'] == 'mul':
-            qualifier_emb = torch.mm(self.coalesce_quals_rel(qualifier_emb, qual_index, rel_part_emb.shape[0], fill=1),
-                                     self.w_qr)
-            return rel_part_emb * qualifier_emb
-        else:
-            raise NotImplementedError
-
-    def update_rel_emb_with_qualifier_att(self,rel_embed,ent_embed,qualifier_rel, qualifier_ent,edge_type, qual_index=None):
-
-        # qualifier_relation = self.qual_relation_attention(rel_embed,qualifier_rel) # 边的加权
-        # qualifier_relation = rel_embed[qualifier_rel]
-        rel_part_emb = rel_embed[edge_type] # 所有边
-        qualifier_emb_rel = rel_embed[qualifier_rel]
-        qualifier_emb_ent = ent_embed[qualifier_ent]
-
-
-
-        # Step 2: pass it through qual_transform
-        qualifier_emb = self.qual_transform(qualifier_ent=qualifier_emb_ent,
-                                            qualifier_rel=qualifier_emb_rel)
-        qualifier_emb = torch.einsum('ij,jk -> ik',
-                                     self.coalesce_quals_rel(qualifier_emb, qual_index, rel_part_emb.shape[0]),# 做加权和
-                                     self.w_qr) #
-        qualifier_emb = self.drop_out_qr(qualifier_emb)
-        qualifier_emb = torch.tanh(qualifier_emb)
-        add_index = torch.zeros(edge_type.size(0),device=qualifier_emb.device).index_fill(0,qual_index,1)
-        rel_qual_part = 0.8 *torch.mul(add_index.unsqueeze(1),rel_part_emb) + (1 - 0.8) * qualifier_emb
-        out = torch.mul((1-add_index).unsqueeze(1),rel_part_emb)+ rel_qual_part
-
-        return out
-
-
     def update_ent_with_qual(self,x_j,rel_embed,edge_type,ent_embed,qual_index,qualifier_rel,qualifier_ent,mode):
         weight = getattr(self, 'w_{}'.format(mode))
         rel_part_emb = rel_embed[edge_type]  #
@@ -366,7 +222,7 @@ class ReSaEConvLayer(MessagePassing):
 
         qualifier_emb_ent = scatter_mean(qualifier_emb_ent, qual_index, dim=0, dim_size=rel_part_emb.shape[0])
         qualifier_emb_ent = self.drop_out_qr(qualifier_emb_ent)
-        qualifier_rel_weight = self.qual_relation_attention_avg(rel_embed, qualifier_rel)  # 边的加权
+        qualifier_rel_weight = self.qual_relation_attention_avg(rel_embed, qualifier_rel)
         qualifier_emb_rel_weight = scatter_mean(qualifier_rel_weight, qual_index, dim=0, dim_size=rel_part_emb.shape[0])
         qualifier_emb_rel_weight = self.drop_out_qr(qualifier_emb_rel_weight)
 
@@ -434,38 +290,6 @@ class ReSaEConvLayer(MessagePassing):
         norm = deg_inv[row] * edge_weight * deg_inv[col]  # Norm parameter D^{-0.5} *
 
         return norm
-
-    def coalesce_quals_rel(self, qual_embeddings, qual_index, num_edges, fill=0):
-
-        if self.p['RESAEARGS']['QUAL_N'] == 'sum':
-            output = scatter_add(qual_embeddings, qual_index, dim=0, dim_size=num_edges)
-            output = self.layernorm_rel(output)
-            output = self.drop_out_qr(output)
-        elif self.p['RESAEARGS']['QUAL_N'] == 'mean':
-            output = scatter_mean(qual_embeddings, qual_index, dim=0, dim_size=num_edges)
-
-        if fill != 0:
-            # by default scatter_ functions assign zeros to the output, so we assign them 1's for correct mult
-            mask = output.sum(dim=-1) == 0
-            output[mask] = fill
-
-        return output
-
-    def coalesce_quals_ent(self, qual_embeddings, qual_index, num_edges, fill=0):
-
-        if self.p['RESAEARGS']['QUAL_N'] == 'sum':
-            output = scatter_add(qual_embeddings, qual_index, dim=0, dim_size=num_edges)
-            output = self.layernorm_en(output)
-            output = self.drop_out_qe(output)
-        elif self.p['RESAEARGS']['QUAL_N'] == 'mean':
-            output = scatter_mean(qual_embeddings, qual_index, dim=0, dim_size=num_edges)
-
-        if fill != 0:
-            # by default scatter_ functions assign zeros to the output, so we assign them 1's for correct mult
-            mask = output.sum(dim=-1) == 0
-            output[mask] = fill
-
-        return output
 
     def __repr__(self):
         return '{}({}, {}, num_rels={})'.format(
