@@ -27,7 +27,17 @@ Specified as `DATASET` in the running script
 
 ### training
 
-python run.py DATASET wd50k
-python run.py DEVICE cuda:0 DATASET wd50k_66
-python run.py DEVICE cuda:0 DATASET jf17k CLEANED_DATASET False
-python run.py DEVICE cuda:0 DATASET wikipeople CLEANED_DATASET False
+* `train on wd50k`
+> python run.py DATASET wd50k
+* `train on wd50k 66% ratio data with qualifier on device cuda:0`
+> python run.py DEVICE cuda:0 DATASET wd50k_66
+
+* `train on jf17k data with hyper-relational setting, on deive cuda:0`
+> python run.py DEVICE cuda:0 DATASET jf17k CLEANED_DATASET False
+* `train on wikipeople with hyper-relational setting, on device cuda:0`
+> python run.py DEVICE cuda:0 DATASET wikipeople CLEANED_DATASET False
+
+
+### acknowledge
+
+The code framework is derived from https://github.com/migalkin/StarE
